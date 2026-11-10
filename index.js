@@ -1,4 +1,3 @@
-
 const {
   Client,
   GatewayIntentBits,
@@ -12,7 +11,8 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  PermissionFlagsBits
+  PermissionFlagsBits,
+  MessageFlags
 } = require("discord.js");
 
 const { Pool } = require("pg");
@@ -26,14 +26,10 @@ const {
   DATABASE_URL
 } = process.env;
 
-if (
-  !DISCORD_TOKEN ||
-  !DISCORD_CLIENT_ID ||
-  !DISCORD_GUILD_ID ||
-  !VERIFIED_ROLE_ID ||
-  !DATABASE_URL
-) {
-  throw new Error("One or more required Railway variables are missing.");
+if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID ||
+    !DISCORD_GUILD_ID || !VERIFIED_ROLE_ID ||
+    !DATABASE_URL) {
+  throw new Error("Missing Railway environment variables.");
 }
 
 // DATABASE
@@ -48,6 +44,22 @@ const pool = new Pool({
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
+
+// CAPTCHA SETTINGS
+const CAPTCHA_TIME = 2 * 60 * 1000;
+const MAX_ATTEMPTS = 3;
+const captchaSessions = new Map();
+
+const CAPTCHA_CATEGORIES = [
+  "traffic lights",
+  "bicycles",
+  "dogs",
+  "buses",
+  "cats",
+  "boats",
+  "motorcycles",
+  "cars"
+];
 
 // SLASH COMMANDS
 const commands = [
@@ -90,11 +102,11 @@ async function registerCommands() {
       DISCORD_GUILD_ID
     ),
     {
-      body: commands.map(command => command.toJSON())
+      body: commands.map(c => c.toJSON())
     }
   );
 
-  console.log("Slash commands registered.");
+  console.log("TLRP commands registered.");
 }
 
 // EMBED CREATOR
@@ -106,7 +118,23 @@ function makeEmbed(title, description, color = 0x5865F2) {
     .setFooter({ text: "TLRP Verification" });
 }
 
-// FIND ROBLOX USER
+// RANDOM HELPERS
+function randomItem(array) {
+  return array[Math.floor(Math.random() * array.length)];
+}
+
+function shuffle(array) {
+  const result = [...array];
+
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+
+  return result;
+}
+
+// ROBLOX USER LOOKUP
 async function resolveRobloxUser(username) {
   const response = await fetch(
     "https://users.roblox.com/v1/usernames/users",
@@ -123,45 +151,193 @@ async function resolveRobloxUser(username) {
   );
 
   if (!response.ok) {
-    throw new Error("Roblox username lookup failed: " + response.status);
+    throw new Error("Roblox username lookup failed.");
   }
 
   const data = await response.json();
   return data.data?.[0] || null;
 }
 
-// GET ROBLOX PROFILE
+// ROBLOX PROFILE
 async function getRobloxProfile(id) {
   const response = await fetch(
     `https://users.roblox.com/v1/users/${id}`
   );
 
   if (!response.ok) {
-    throw new Error("Roblox profile lookup failed: " + response.status);
+    throw new Error("Roblox profile lookup failed.");
   }
 
   return response.json();
 }
 
-// CREATE VERIFICATION PANEL
+// GET CAPTCHA IMAGES
+async function getCaptchaImages(category) {
+  const params = new URLSearchParams({
+    action: "query",
+    generator: "search",
+    gsrsearch: `filetype:bitmap ${category}`,
+    gsrnamespace: "6",
+    gsrlimit: "30",
+    prop: "imageinfo",
+    iiprop: "url",
+    iiurlwidth: "320",
+    format: "json"
+  });
+
+  const response = await fetch(
+    `https://commons.wikimedia.org/w/api.php?${params}`,
+    {
+      headers: {
+        "User-Agent": "TLRPVerificationBot/1.0"
+      }
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error("Could not retrieve CAPTCHA images.");
+  }
+
+  const data = await response.json();
+
+  return Object.values(data.query?.pages || {})
+    .map(page => page.imageinfo?.[0]?.thumburl)
+    .filter(url =>
+      typeof url === "string" &&
+      url.startsWith("https://upload.wikimedia.org/") &&
+      !url.toLowerCase().includes(".svg")
+    );
+}
+// CREATE RANDOM CAPTCHA
+async function createCaptcha(username, userId) {
+  const target = randomItem(CAPTCHA_CATEGORIES);
+
+  const distractors = CAPTCHA_CATEGORIES.filter(
+    category => category !== target
+  );
+
+  const distractor = randomItem(distractors);
+
+  const [targetImages, otherImages] = await Promise.all([
+    getCaptchaImages(target),
+    getCaptchaImages(distractor)
+  ]);
+
+  if (targetImages.length < 4 || otherImages.length < 5) {
+    throw new Error("Not enough CAPTCHA images found.");
+  }
+
+  const tiles = shuffle([
+    ...shuffle(targetImages).slice(0, 4).map(url => ({
+      url,
+      correct: true
+    })),
+    ...shuffle(otherImages).slice(0, 5).map(url => ({
+      url,
+      correct: false
+    }))
+  ]);
+
+  const challenge = {
+    userId,
+    username,
+    target,
+    tiles,
+    selected: new Set(),
+    attempts: 0,
+    expiresAt: Date.now() + CAPTCHA_TIME
+  };
+
+  captchaSessions.set(userId, challenge);
+  return challenge;
+}
+
+// CAPTCHA IMAGE EMBEDS
+function buildCaptchaEmbeds(challenge) {
+  return challenge.tiles.map((tile, index) => {
+    const selected = challenge.selected.has(index);
+
+    const embed = new EmbedBuilder()
+      .setColor(selected ? 0x57F287 : 0x5865F2)
+      .setTitle(`Tile ${index + 1}`)
+      .setImage(tile.url);
+
+    if (index === 0) {
+      embed.setDescription(
+        `Select all images containing **${challenge.target}**.`
+      );
+    }
+
+    return embed;
+  });
+}
+
+// CAPTCHA BUTTONS
+function buildCaptchaButtons(challenge) {
+  const rows = [];
+
+  for (let r = 0; r < 2; r++) {
+    const row = new ActionRowBuilder();
+
+    for (let i = r * 5; i < Math.min(r * 5 + 5, 9); i++) {
+      const selected = challenge.selected.has(i);
+
+      row.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`tlrp_tile_${i}`)
+          .setLabel(`${i + 1}${selected ? " ✓" : ""}`)
+          .setStyle(
+            selected
+              ? ButtonStyle.Success
+              : ButtonStyle.Secondary
+          )
+      );
+    }
+
+    rows.push(row);
+  }
+
+  rows.push(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("tlrp_submit")
+        .setLabel("Submit CAPTCHA")
+        .setEmoji("✅")
+        .setStyle(ButtonStyle.Primary)
+    )
+  );
+
+  return rows;
+}
+
+// SHOW CAPTCHA
+async function showCaptcha(interaction, challenge, message = "") {
+  return interaction.editReply({
+    content: message ||
+      `🛡️ **TLRP Human Verification**\nSelect all images containing **${challenge.target}**.`,
+    embeds: buildCaptchaEmbeds(challenge),
+    components: buildCaptchaButtons(challenge)
+  });
+}
+
+// VERIFICATION PANEL
 async function setupPanel(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({
+    flags: MessageFlags.Ephemeral
+  });
 
   try {
     const panel = makeEmbed(
       "🛡️ Welcome to TLRP!",
       [
-        "To unlock access to all TLRP channels, verify your Roblox account.",
+        "To unlock all TLRP channels, verify your Roblox account.",
         "",
-        "**How to get verified:**",
+        "**How to verify:**",
         "1. Click Verify Account.",
         "2. Enter your Roblox username.",
-        "3. Our bot checks your Roblox account age.",
-        "4. Receive your Verified role automatically!",
-        "",
-        "**Requirements:**",
-        "• Your Roblox account must exist.",
-        "• Your account must be at least 7 days old.",
+        "3. Complete the image CAPTCHA.",
+        "4. Pass the 7-day Roblox account age check.",
+        "5. Receive your Verified role!",
         "",
         "Welcome to TLRP!"
       ].join("\n")
@@ -180,20 +356,15 @@ async function setupPanel(interaction) {
       ]
     });
 
-    await interaction.editReply(
-      "✅ TLRP verification panel created successfully!"
-    );
+    await interaction.editReply("✅ Verification panel created!");
 
   } catch (error) {
-    console.error("SETUP PANEL ERROR:", error);
-
-    await interaction.editReply(
-      "❌ Could not create the panel. Check channel permissions."
-    );
+    console.error("PANEL ERROR:", error);
+    await interaction.editReply("❌ Could not create the panel.");
   }
 }
 
-// SHOW USERNAME POPUP
+// ROBLOX USERNAME POPUP
 async function showModal(interaction) {
   const modal = new ModalBuilder()
     .setCustomId("tlrp_username_modal")
@@ -215,24 +386,55 @@ async function showModal(interaction) {
   await interaction.showModal(modal);
 }
 
-// VERIFY ROBLOX ACCOUNT AGE
+// START CAPTCHA
 async function startVerification(interaction, username) {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({
+    flags: MessageFlags.Ephemeral
+  });
 
   try {
-    // Check whether Discord account is already linked
     const existing = await pool.query(
-      "SELECT * FROM account_links WHERE discord_id = $1",
+      "SELECT discord_id FROM account_links WHERE discord_id = $1",
       [interaction.user.id]
     );
 
     if (existing.rows.length) {
       return interaction.editReply(
-        "You already have a Roblox account linked. Use /profile to view it."
+        "You are already registered with TLRP Verification!"
       );
     }
 
-    // Look up Roblox username
+    const challenge = await createCaptcha(
+      username,
+      interaction.user.id
+    );
+
+    return showCaptcha(interaction, challenge);
+
+  } catch (error) {
+    console.error("CAPTCHA ERROR:", error);
+    captchaSessions.delete(interaction.user.id);
+
+    return interaction.editReply(
+      "❌ Could not load CAPTCHA images. Please try again later."
+    );
+  }
+}
+
+// COMPLETE ROBLOX VERIFICATION
+async function completeVerification(interaction, username) {
+  try {
+    const existing = await pool.query(
+      "SELECT discord_id FROM account_links WHERE discord_id = $1",
+      [interaction.user.id]
+    );
+
+    if (existing.rows.length) {
+      return interaction.editReply(
+        "You are already registered!"
+      );
+    }
+
     const user = await resolveRobloxUser(username);
 
     if (!user) {
@@ -241,12 +443,11 @@ async function startVerification(interaction, username) {
       );
     }
 
-    // Get account creation date
     const profile = await getRobloxProfile(user.id);
 
     if (!profile.created) {
       return interaction.editReply(
-        "❌ Could not check your Roblox account age. Please try again."
+        "❌ Could not check Roblox account age."
       );
     }
 
@@ -258,18 +459,16 @@ async function startVerification(interaction, username) {
 
     if (!Number.isFinite(ageDays) || ageDays < 0) {
       return interaction.editReply(
-        "❌ Could not verify your Roblox account age."
+        "❌ Could not verify account creation date."
       );
     }
 
-    // Require at least 7 days
     if (ageDays < 7) {
       return interaction.editReply(
-        `❌ Your Roblox account is only ${ageDays} days old.\n\nTLRP requires accounts to be at least 7 days old. Please come back later!`
+        `❌ Your Roblox account is only ${ageDays} days old. TLRP requires at least 7 days.`
       );
     }
 
-    // Check whether Roblox account is already linked
     const linked = await pool.query(
       "SELECT discord_id FROM account_links WHERE roblox_id = $1",
       [String(user.id)]
@@ -281,77 +480,184 @@ async function startVerification(interaction, username) {
       );
     }
 
-    // Get Discord member
     const member = await interaction.guild.members.fetch(
       interaction.user.id
     );
 
-    // Save account link
     const saved = await pool.query(
       `INSERT INTO account_links
        (discord_id, roblox_id, roblox_username)
        VALUES ($1, $2, $3)
        ON CONFLICT DO NOTHING
        RETURNING discord_id`,
-      [
-        interaction.user.id,
-        String(user.id),
-        user.name
-      ]
+      [interaction.user.id, String(user.id), user.name]
     );
 
     if (!saved.rows.length) {
       return interaction.editReply(
-        "❌ This Roblox or Discord account has already been linked."
+        "❌ This account is already registered."
       );
     }
 
-    // Assign Verified role
     try {
       await member.roles.add(
         VERIFIED_ROLE_ID,
-        "TLRP 7-day Roblox account age requirement"
+        "TLRP CAPTCHA and Roblox age verification"
       );
-    } catch (roleError) {
+    } catch (error) {
       await pool.query(
         "DELETE FROM account_links WHERE discord_id = $1",
         [interaction.user.id]
       );
-
-      throw roleError;
+      throw error;
     }
 
-    // Success message
     return interaction.editReply({
+      content: "",
       embeds: [
         makeEmbed(
           "✅ TLRP Verification Successful!",
           [
-            `**Roblox username:** ${user.name}`,
+            `**Roblox:** ${user.name}`,
             `**Account age:** ${ageDays} days`,
             "",
-            "You passed the 7-day account age requirement!",
-            "",
+            "CAPTCHA passed!",
             "Your Verified role has been assigned.",
             "Welcome to TLRP!"
           ].join("\n"),
           0x57F287
         )
-      ]
+      ],
+      components: []
     });
 
   } catch (error) {
     console.error("VERIFICATION ERROR:", error);
 
     return interaction.editReply(
-      "❌ Verification failed. Please try again or contact staff."
-    ).catch(console.error);
+      "❌ Verification failed. Please contact staff."
+    );
+  }
+}
+// HANDLE CAPTCHA BUTTONS
+async function handleCaptchaButton(interaction) {
+  const challenge = captchaSessions.get(interaction.user.id);
+
+  if (!challenge) {
+    return interaction.reply({
+      content: "Your CAPTCHA expired. Please start again.",
+      flags: MessageFlags.Ephemeral
+    });
+  }
+
+  if (Date.now() > challenge.expiresAt) {
+    captchaSessions.delete(interaction.user.id);
+
+    return interaction.update({
+      content: "⏰ CAPTCHA expired. Please start again.",
+      embeds: [],
+      components: []
+    });
+  }
+
+  // IMAGE SELECTION
+  if (interaction.customId.startsWith("tlrp_tile_")) {
+    const index = Number(
+      interaction.customId.replace("tlrp_tile_", "")
+    );
+
+    if (!Number.isInteger(index) || index < 0 || index > 8) {
+      return interaction.reply({
+        content: "Invalid selection.",
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    if (challenge.selected.has(index)) {
+      challenge.selected.delete(index);
+    } else {
+      challenge.selected.add(index);
+    }
+
+    return interaction.update({
+      content: `Select all images containing **${challenge.target}**.`,
+      embeds: buildCaptchaEmbeds(challenge),
+      components: buildCaptchaButtons(challenge)
+    });
+  }
+
+  // SUBMIT CAPTCHA
+  if (interaction.customId === "tlrp_submit") {
+    const correct = challenge.tiles
+      .map((tile, index) => tile.correct ? index : -1)
+      .filter(index => index !== -1);
+
+    const selected = [...challenge.selected].sort((a, b) => a - b);
+
+    const expected = [...correct].sort((a, b) => a - b);
+
+    const passed =
+      selected.length === expected.length &&
+      selected.every((value, index) => value === expected[index]);
+
+    if (!passed) {
+      challenge.attempts++;
+
+      if (challenge.attempts >= MAX_ATTEMPTS) {
+        captchaSessions.delete(interaction.user.id);
+
+        return interaction.update({
+          content: "❌ Too many attempts. Start verification again.",
+          embeds: [],
+          components: []
+        });
+      }
+
+      try {
+        const newChallenge = await createCaptcha(
+          challenge.username,
+          interaction.user.id
+        );
+
+        newChallenge.attempts = challenge.attempts;
+
+        return interaction.update({
+          content: `❌ Incorrect! Attempt ${challenge.attempts}/${MAX_ATTEMPTS}. Try again.`,
+          embeds: buildCaptchaEmbeds(newChallenge),
+          components: buildCaptchaButtons(newChallenge)
+        });
+
+      } catch (error) {
+        console.error(error);
+        captchaSessions.delete(interaction.user.id);
+
+        return interaction.update({
+          content: "Could not load another CAPTCHA. Try again later.",
+          embeds: [],
+          components: []
+        });
+      }
+    }
+
+    const username = challenge.username;
+
+    captchaSessions.delete(interaction.user.id);
+
+    await interaction.update({
+      content: "✅ CAPTCHA passed! Checking your Roblox account...",
+      embeds: [],
+      components: []
+    });
+
+    return completeVerification(interaction, username);
   }
 }
 
-// VIEW LINKED PROFILE
+// PROFILE COMMAND
 async function showProfile(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({
+    flags: MessageFlags.Ephemeral
+  });
 
   const result = await pool.query(
     "SELECT * FROM account_links WHERE discord_id = $1",
@@ -360,7 +666,7 @@ async function showProfile(interaction) {
 
   if (!result.rows.length) {
     return interaction.editReply(
-      "You are not verified yet. Click Verify Account to get started."
+      "You are not verified yet. Use Verify Account."
     );
   }
 
@@ -370,29 +676,26 @@ async function showProfile(interaction) {
     embeds: [
       makeEmbed(
         "Your TLRP Profile",
-        [
-          `**Roblox:** ${account.roblox_username}`,
-          `**Profile:** https://www.roblox.com/users/${account.roblox_id}/profile`
-        ].join("\n")
+        `**Roblox:** ${account.roblox_username}\n**Profile:** https://www.roblox.com/users/${account.roblox_id}/profile`
       )
     ]
   });
 }
 
-// UNLINK ACCOUNT
+// UNLINK COMMAND
 async function unlinkAccount(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({
+    flags: MessageFlags.Ephemeral
+  });
 
   const result = await pool.query(
-    `DELETE FROM account_links
-     WHERE discord_id = $1
-     RETURNING roblox_username`,
+    "DELETE FROM account_links WHERE discord_id = $1 RETURNING roblox_username",
     [interaction.user.id]
   );
 
   if (!result.rows.length) {
     return interaction.editReply(
-      "You do not have a linked Roblox account."
+      "You do not have a linked account."
     );
   }
 
@@ -403,23 +706,28 @@ async function unlinkAccount(interaction) {
   await member.roles.remove(VERIFIED_ROLE_ID);
 
   return interaction.editReply(
-    `Your Roblox account ${result.rows[0].roblox_username} has been unlinked and your Verified role removed.`
+    `Your Roblox account ${result.rows[0].roblox_username} has been unlinked.`
   );
 }
 
-// HANDLE DISCORD INTERACTIONS
+// DISCORD INTERACTIONS
 client.on("interactionCreate", async interaction => {
   try {
     if (interaction.guildId !== DISCORD_GUILD_ID) return;
 
-    // BUTTONS
     if (interaction.isButton()) {
       if (interaction.customId === "tlrp_verify") {
         return showModal(interaction);
       }
+
+      if (
+        interaction.customId.startsWith("tlrp_tile_") ||
+        interaction.customId === "tlrp_submit"
+      ) {
+        return handleCaptchaButton(interaction);
+      }
     }
 
-    // USERNAME MODAL
     if (
       interaction.isModalSubmit() &&
       interaction.customId === "tlrp_username_modal"
@@ -431,7 +739,6 @@ client.on("interactionCreate", async interaction => {
       return startVerification(interaction, username);
     }
 
-    // SLASH COMMANDS
     if (!interaction.isChatInputCommand()) return;
 
     if (interaction.commandName === "setupverify") {
@@ -440,7 +747,7 @@ client.on("interactionCreate", async interaction => {
       )) {
         return interaction.reply({
           content: "You need Manage Server permission.",
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
       }
 
@@ -459,7 +766,7 @@ client.on("interactionCreate", async interaction => {
     console.error("INTERACTION ERROR:", error);
 
     const response = {
-      content: "An unexpected error occurred. Please try again.",
+      content: "An unexpected error occurred.",
       embeds: [],
       components: []
     };
@@ -469,14 +776,14 @@ client.on("interactionCreate", async interaction => {
     } else {
       await interaction.reply({
         ...response,
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       }).catch(() => {});
     }
   }
 });
 
 // BOT READY
-client.once("ready", () => {
+client.once("clientReady", () => {
   console.log(`${client.user.tag} is online!`);
 });
 
