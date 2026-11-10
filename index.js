@@ -205,6 +205,7 @@ async function showModal(interaction) {
 
 // START VERIFICATION
 
+
 async function startVerification(interaction, username) {
   await interaction.deferReply({ ephemeral: true });
 
@@ -216,7 +217,7 @@ async function startVerification(interaction, username) {
 
     if (existing.rows.length) {
       return interaction.editReply(
-        "You are already verified! Use /profile to view your account."
+        "You are already registered with TLRP Verification!"
       );
     }
 
@@ -224,10 +225,37 @@ async function startVerification(interaction, username) {
 
     if (!user) {
       return interaction.editReply(
-        "Roblox account not found. Check your username."
+        "❌ Roblox account not found. Check your username."
       );
     }
 
+    // Get the Roblox account creation date
+    const profile = await getRobloxProfile(user.id);
+
+    if (!profile.created) {
+      return interaction.editReply(
+        "❌ Could not check your Roblox account age. Please try again."
+      );
+    }
+
+    const createdDate = new Date(profile.created);
+    const ageDays = Math.floor(
+      (Date.now() - createdDate.getTime()) / 86400000
+    );
+
+    if (!Number.isFinite(ageDays) || ageDays < 0) {
+      return interaction.editReply(
+        "❌ Could not verify your account creation date."
+      );
+    }
+
+    if (ageDays < 7) {
+      return interaction.editReply(
+        `❌ Your Roblox account is only ${ageDays} days old.\n\nTLRP requires Roblox accounts to be at least 7 days old. Please come back later!`
+      );
+    }
+
+    // Check whether this Roblox account is already linked
     const linked = await pool.query(
       "SELECT discord_id FROM account_links WHERE roblox_id = $1",
       [String(user.id)]
@@ -235,9 +263,71 @@ async function startVerification(interaction, username) {
 
     if (linked.rows.length) {
       return interaction.editReply(
-        "This Roblox account is already linked to another Discord account."
+        "❌ This Roblox account is already registered with another Discord account."
       );
     }
+
+    const member = await interaction.guild.members.fetch(
+      interaction.user.id
+    );
+
+    // Save the account link
+    const saved = await pool.query(
+      `INSERT INTO account_links
+       (discord_id, roblox_id, roblox_username)
+       VALUES ($1, $2, $3)
+       ON CONFLICT DO NOTHING
+       RETURNING discord_id`,
+      [interaction.user.id, String(user.id), user.name]
+    );
+
+    if (!saved.rows.length) {
+      return interaction.editReply(
+        "❌ This Roblox or Discord account is already registered."
+      );
+    }
+
+    try {
+      await member.roles.add(
+        VERIFIED_ROLE_ID,
+        "TLRP 7-day Roblox account age check"
+      );
+    } catch (roleError) {
+      await pool.query(
+        "DELETE FROM account_links WHERE discord_id = $1",
+        [interaction.user.id]
+      );
+      throw roleError;
+    }
+
+    return interaction.editReply({
+      embeds: [
+        makeEmbed(
+          "✅ TLRP Verification Successful!",
+          [
+            `**Roblox username:** ${user.name}`,
+            `**Account age:** ${ageDays} days`,
+            "",
+            "You passed the 7-day account age requirement!",
+            "",
+            "Your Verified role has been assigned.",
+            "Welcome to TLRP!"
+          ].join("\n"),
+          0x57F287
+        )
+      ],
+      components: []
+    });
+
+  } catch (error) {
+    console.error("VERIFICATION ERROR:", error);
+
+    return interaction.editReply(
+      "❌ Verification failed. Please try again or contact staff."
+    ).catch(console.error);
+  }
+}
+
 
     const code =
       "TLRP-" +
