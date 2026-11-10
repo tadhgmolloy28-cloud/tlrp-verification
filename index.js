@@ -172,17 +172,19 @@ async function getRobloxProfile(id) {
 }
 
 // GET CAPTCHA IMAGES
+
 async function getCaptchaImages(category) {
   const params = new URLSearchParams({
     action: "query",
     generator: "search",
-    gsrsearch: `filetype:bitmap ${category}`,
+    gsrsearch: category,
     gsrnamespace: "6",
-    gsrlimit: "30",
+    gsrlimit: "50",
     prop: "imageinfo",
     iiprop: "url",
     iiurlwidth: "320",
-    format: "json"
+    format: "json",
+    origin: "*"
   });
 
   const response = await fetch(
@@ -195,19 +197,29 @@ async function getCaptchaImages(category) {
   );
 
   if (!response.ok) {
-    throw new Error("Could not retrieve CAPTCHA images.");
+    throw new Error(
+      `Wikimedia error: ${response.status}`
+    );
   }
 
   const data = await response.json();
 
-  return Object.values(data.query?.pages || {})
+  const images = Object.values(
+    data.query?.pages || {}
+  )
     .map(page => page.imageinfo?.[0]?.thumburl)
     .filter(url =>
       typeof url === "string" &&
-      url.startsWith("https://upload.wikimedia.org/") &&
-      !url.toLowerCase().includes(".svg")
+      url.startsWith("https://upload.wikimedia.org/")
     );
+
+  console.log(
+    `CAPTCHA category ${category}: ${images.length} images found`
+  );
+
+  return images;
 }
+
 // CREATE RANDOM CAPTCHA
 async function createCaptcha(username, userId) {
   const target = randomItem(CAPTCHA_CATEGORIES);
