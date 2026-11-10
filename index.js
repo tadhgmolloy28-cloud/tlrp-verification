@@ -16,6 +16,7 @@ const {
 } = require("discord.js");
 
 const express = require("express");
+const crypto = require("node:crypto");
 const { Pool } = require("pg");
 
 // RAILWAY VARIABLES
