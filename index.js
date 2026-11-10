@@ -173,11 +173,25 @@ async function getRobloxProfile(id) {
 
 // GET CAPTCHA IMAGES
 
+
 async function getCaptchaImages(category) {
+  const searchTerms = {
+    "traffic lights": "traffic light",
+    bicycles: "bicycle",
+    dogs: "dog",
+    buses: "bus",
+    cats: "cat",
+    boats: "boat",
+    motorcycles: "motorcycle",
+    cars: "car"
+  };
+
+  const term = searchTerms[category];
+
   const params = new URLSearchParams({
     action: "query",
     generator: "search",
-    gsrsearch: category,
+    gsrsearch: term,
     gsrnamespace: "6",
     gsrlimit: "50",
     prop: "imageinfo",
@@ -197,28 +211,20 @@ async function getCaptchaImages(category) {
   );
 
   if (!response.ok) {
-    throw new Error(
-      `Wikimedia error: ${response.status}`
-    );
+    throw new Error(`Image source error: ${response.status}`);
   }
 
   const data = await response.json();
 
-  const images = Object.values(
-    data.query?.pages || {}
-  )
+  return Object.values(data.query?.pages || {})
     .map(page => page.imageinfo?.[0]?.thumburl)
     .filter(url =>
       typeof url === "string" &&
-      url.startsWith("https://upload.wikimedia.org/")
+      url.startsWith("https://upload.wikimedia.org/") &&
+      !url.toLowerCase().endsWith(".svg")
     );
-
-  console.log(
-    `CAPTCHA category ${category}: ${images.length} images found`
-  );
-
-  return images;
 }
+
 
 // CREATE RANDOM CAPTCHA
 async function createCaptcha(username, userId) {
