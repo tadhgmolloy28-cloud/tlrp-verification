@@ -15,6 +15,7 @@ const {
   MessageFlags
 } = require("discord.js");
 
+const express = require("express");
 const { Pool } = require("pg");
 
 // RAILWAY VARIABLES
@@ -41,6 +42,21 @@ const pool = new Pool({
 });
 
 // DISCORD BOT
+
+const app = express();
+
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+
+const app = express();
+
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
@@ -117,6 +133,123 @@ function makeEmbed(title, description, color = 0x5865F2) {
     .setColor(color)
     .setFooter({ text: "TLRP Verification" });
 }
+
+
+app.get("/verify", (req, res) => {
+  const id = req.query.id;
+
+  if (!id || !browserVerifications.has(id)) {
+    return res.status(400).send("Invalid or expired verification link.");
+  }
+
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>TLRP Verification</title>
+      <script src="https://js.hcaptcha.com/1/api.js" async defer></script>
+      <style>
+        body {
+          background: #202225;
+          color: white;
+          font-family: Arial;
+          text-align: center;
+          padding: 40px 10px;
+        }
+        .panel {
+          background: #2f3136;
+          padding: 25px;
+          border-radius: 12px;
+          max-width: 400px;
+          margin: auto;
+        }
+        button {
+          background: #5865f2;
+          color: white;
+          border: 0;
+          padding: 12px 25px;
+          border-radius: 6px;
+          margin-top: 20px;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="panel">
+        <h2>🛡️ TLRP Security Check</h2>
+        <p>Complete the CAPTCHA to continue.</p>
+        <form method="POST" action="/verify">
+          <input type="hidden" name="id" value="${id.replace(/[^a-f0-9]/gi, "")}">
+          <div class="h-captcha" data-sitekey="${HCAPTCHA_SITEKEY}"></div>
+          <button type="submit">Verify</button>
+        </form>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
+
+app.post("/verify", async (req, res) => {
+  const { id, "h-captcha-response": captchaResponse } = req.body;
+
+  const session = browserVerifications.get(id);
+
+  if (!session || Date.now() > session.expiresAt) {
+    browserVerifications.delete(id);
+    return res.status(400).send("Verification expired. Return to Discord and try again.");
+  }
+
+  if (!captchaResponse) {
+    return res.status(400).send("Please complete the CAPTCHA.");
+  }
+
+  try {
+    const params = new URLSearchParams();
+    params.append("secret", HCAPTCHA_SECRET);
+    params.append("response", captchaResponse);
+
+    const response = await fetch(
+      "https://api.hcaptcha.com/siteverify",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: params
+      }
+    );
+
+    const result = await response.json();
+
+    if (!result.success) {
+      return res.status(403).send("CAPTCHA failed. Please try again.");
+    }
+
+    
+// CAPTCHA passed - continue Roblox verification
+browserVerifications.delete(id);
+
+res.send(`
+  <h2>✅ CAPTCHA passed!</h2>
+  <p>Your Roblox account is now being checked.</p>
+  <p>Return to Discord to see your result.</p>
+`);
+
+await completeVerification(
+  session.interaction,
+  session.username
+);
+
+return;
+
+
+  } catch (error) {
+    console.error("HCAPTCHA ERROR:", error);
+    return res.status(500).send("Verification service temporarily unavailable.");
+  }
+});
+
 
 // RANDOM HELPERS
 function randomItem(array) {
@@ -405,6 +538,7 @@ async function showModal(interaction) {
 }
 
 // START CAPTCHA
+
 async function startVerification(interaction, username) {
   await interaction.deferReply({
     flags: MessageFlags.Ephemeral
@@ -422,19 +556,28 @@ async function startVerification(interaction, username) {
       );
     }
 
-    const challenge = await createCaptcha(
-      username,
-      interaction.user.id
-    );
+    const id = crypto.randomBytes(24).toString("hex");
 
-    return showCaptcha(interaction, challenge);
+    browserVerifications.set(id, {
+      discordId: interaction.user.id,
+      username,
+      interaction,
+      expiresAt: Date.now() + 5 * 60 * 1000
+    });
+
+    await interaction.editReply({
+      content:
+        `🛡️ **TLRP Human Verification**\n\n` +
+        `Complete your CAPTCHA here:\n` +
+        `${APP_BASE_URL}/verify?id=${id}\n\n` +
+        `You have 5 minutes to complete it.`
+    });
 
   } catch (error) {
-    console.error("CAPTCHA ERROR:", error);
-    captchaSessions.delete(interaction.user.id);
+    console.error("START VERIFICATION ERROR:", error);
 
     return interaction.editReply(
-      "❌ Could not load CAPTCHA images. Please try again later."
+      "❌ Could not start verification. Please try again."
     );
   }
 }
@@ -806,11 +949,17 @@ client.once("clientReady", () => {
 });
 
 // START BOT
+
 async function start() {
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`TLRP CAPTCHA website running on port ${PORT}`);
+  });
+
   await initializeDatabase();
   await registerCommands();
   await client.login(DISCORD_TOKEN);
 }
+
 
 start().catch(error => {
   console.error("STARTUP FAILED:", error);
