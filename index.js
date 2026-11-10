@@ -16,8 +16,8 @@ const {
 } = require("discord.js");
 
 const { Pool } = require("pg");
-const crypto = require("crypto");
 
+// RAILWAY VARIABLES
 const {
   DISCORD_TOKEN,
   DISCORD_CLIENT_ID,
@@ -26,6 +26,17 @@ const {
   DATABASE_URL
 } = process.env;
 
+if (
+  !DISCORD_TOKEN ||
+  !DISCORD_CLIENT_ID ||
+  !DISCORD_GUILD_ID ||
+  !VERIFIED_ROLE_ID ||
+  !DATABASE_URL
+) {
+  throw new Error("One or more required Railway variables are missing.");
+}
+
+// DATABASE
 const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: DATABASE_URL.includes("localhost")
@@ -33,10 +44,12 @@ const pool = new Pool({
     : { rejectUnauthorized: false }
 });
 
+// DISCORD BOT
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
+// SLASH COMMANDS
 const commands = [
   new SlashCommandBuilder()
     .setName("setupverify")
@@ -54,6 +67,7 @@ const commands = [
     .setDescription("Unlink your Roblox account.")
 ];
 
+// DATABASE SETUP
 async function initializeDatabase() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS account_links (
@@ -63,18 +77,9 @@ async function initializeDatabase() {
       verified_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS pending_verifications (
-      discord_id TEXT PRIMARY KEY,
-      roblox_id TEXT NOT NULL,
-      roblox_username TEXT NOT NULL,
-      code TEXT NOT NULL,
-      expires_at TIMESTAMPTZ NOT NULL
-    )
-  `);
 }
 
+// REGISTER COMMANDS
 async function registerCommands() {
   const rest = new REST({ version: "10" })
     .setToken(DISCORD_TOKEN);
@@ -85,11 +90,14 @@ async function registerCommands() {
       DISCORD_GUILD_ID
     ),
     {
-      body: commands.map(c => c.toJSON())
+      body: commands.map(command => command.toJSON())
     }
   );
+
+  console.log("Slash commands registered.");
 }
 
+// EMBED CREATOR
 function makeEmbed(title, description, color = 0x5865F2) {
   return new EmbedBuilder()
     .setTitle(title)
@@ -98,12 +106,15 @@ function makeEmbed(title, description, color = 0x5865F2) {
     .setFooter({ text: "TLRP Verification" });
 }
 
+// FIND ROBLOX USER
 async function resolveRobloxUser(username) {
   const response = await fetch(
     "https://users.roblox.com/v1/usernames/users",
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json"
+      },
       body: JSON.stringify({
         usernames: [username],
         excludeBannedUsers: false
@@ -111,25 +122,28 @@ async function resolveRobloxUser(username) {
     }
   );
 
-  if (!response.ok) throw new Error("Roblox API error");
+  if (!response.ok) {
+    throw new Error("Roblox username lookup failed: " + response.status);
+  }
 
   const data = await response.json();
   return data.data?.[0] || null;
 }
 
+// GET ROBLOX PROFILE
 async function getRobloxProfile(id) {
   const response = await fetch(
     `https://users.roblox.com/v1/users/${id}`
   );
 
-  if (!response.ok) throw new Error("Roblox profile error");
+  if (!response.ok) {
+    throw new Error("Roblox profile lookup failed: " + response.status);
+  }
 
   return response.json();
 }
 
-// CREATE PUBLIC VERIFICATION PANEL
-
-
+// CREATE VERIFICATION PANEL
 async function setupPanel(interaction) {
   await interaction.deferReply({ ephemeral: true });
 
@@ -137,19 +151,19 @@ async function setupPanel(interaction) {
     const panel = makeEmbed(
       "🛡️ Welcome to TLRP!",
       [
-        "To unlock access to all TLRP channels,",
-        "you must verify your Roblox account.",
+        "To unlock access to all TLRP channels, verify your Roblox account.",
         "",
-        "**How to verify:**",
+        "**How to get verified:**",
         "1. Click Verify Account.",
         "2. Enter your Roblox username.",
-        "3. Copy your unique verification code.",
-        "4. Put it in your Roblox About description.",
-        "5. Press Confirm Verification.",
+        "3. Our bot checks your Roblox account age.",
+        "4. Receive your Verified role automatically!",
         "",
-        "You will automatically receive the Verified role!",
+        "**Requirements:**",
+        "• Your Roblox account must exist.",
+        "• Your account must be at least 7 days old.",
         "",
-        "**Click below to get started.**"
+        "Welcome to TLRP!"
       ].join("\n")
     );
 
@@ -166,22 +180,20 @@ async function setupPanel(interaction) {
       ]
     });
 
-    await interaction.editReply({
-      content: "✅ TLRP verification panel successfully created!"
-    });
+    await interaction.editReply(
+      "✅ TLRP verification panel created successfully!"
+    );
 
   } catch (error) {
     console.error("SETUP PANEL ERROR:", error);
 
-    await interaction.editReply({
-      content: "❌ Could not create the panel. Check bot channel permissions."
-    }).catch(console.error);
+    await interaction.editReply(
+      "❌ Could not create the panel. Check channel permissions."
+    );
   }
 }
 
-
-// SHOW ROBLOX USERNAME POPUP
-
+// SHOW USERNAME POPUP
 async function showModal(interaction) {
   const modal = new ModalBuilder()
     .setCustomId("tlrp_username_modal")
@@ -203,13 +215,12 @@ async function showModal(interaction) {
   await interaction.showModal(modal);
 }
 
-// START VERIFICATION
-
-
+// VERIFY ROBLOX ACCOUNT AGE
 async function startVerification(interaction, username) {
   await interaction.deferReply({ ephemeral: true });
 
   try {
+    // Check whether Discord account is already linked
     const existing = await pool.query(
       "SELECT * FROM account_links WHERE discord_id = $1",
       [interaction.user.id]
@@ -217,10 +228,11 @@ async function startVerification(interaction, username) {
 
     if (existing.rows.length) {
       return interaction.editReply(
-        "You are already registered with TLRP Verification!"
+        "You already have a Roblox account linked. Use /profile to view it."
       );
     }
 
+    // Look up Roblox username
     const user = await resolveRobloxUser(username);
 
     if (!user) {
@@ -229,7 +241,7 @@ async function startVerification(interaction, username) {
       );
     }
 
-    // Get the Roblox account creation date
+    // Get account creation date
     const profile = await getRobloxProfile(user.id);
 
     if (!profile.created) {
@@ -239,23 +251,25 @@ async function startVerification(interaction, username) {
     }
 
     const createdDate = new Date(profile.created);
+
     const ageDays = Math.floor(
       (Date.now() - createdDate.getTime()) / 86400000
     );
 
     if (!Number.isFinite(ageDays) || ageDays < 0) {
       return interaction.editReply(
-        "❌ Could not verify your account creation date."
+        "❌ Could not verify your Roblox account age."
       );
     }
 
+    // Require at least 7 days
     if (ageDays < 7) {
       return interaction.editReply(
-        `❌ Your Roblox account is only ${ageDays} days old.\n\nTLRP requires Roblox accounts to be at least 7 days old. Please come back later!`
+        `❌ Your Roblox account is only ${ageDays} days old.\n\nTLRP requires accounts to be at least 7 days old. Please come back later!`
       );
     }
 
-    // Check whether this Roblox account is already linked
+    // Check whether Roblox account is already linked
     const linked = await pool.query(
       "SELECT discord_id FROM account_links WHERE roblox_id = $1",
       [String(user.id)]
@@ -263,43 +277,51 @@ async function startVerification(interaction, username) {
 
     if (linked.rows.length) {
       return interaction.editReply(
-        "❌ This Roblox account is already registered with another Discord account."
+        "❌ This Roblox account is already linked to another Discord account."
       );
     }
 
+    // Get Discord member
     const member = await interaction.guild.members.fetch(
       interaction.user.id
     );
 
-    // Save the account link
+    // Save account link
     const saved = await pool.query(
       `INSERT INTO account_links
        (discord_id, roblox_id, roblox_username)
        VALUES ($1, $2, $3)
        ON CONFLICT DO NOTHING
        RETURNING discord_id`,
-      [interaction.user.id, String(user.id), user.name]
+      [
+        interaction.user.id,
+        String(user.id),
+        user.name
+      ]
     );
 
     if (!saved.rows.length) {
       return interaction.editReply(
-        "❌ This Roblox or Discord account is already registered."
+        "❌ This Roblox or Discord account has already been linked."
       );
     }
 
+    // Assign Verified role
     try {
       await member.roles.add(
         VERIFIED_ROLE_ID,
-        "TLRP 7-day Roblox account age check"
+        "TLRP 7-day Roblox account age requirement"
       );
     } catch (roleError) {
       await pool.query(
         "DELETE FROM account_links WHERE discord_id = $1",
         [interaction.user.id]
       );
+
       throw roleError;
     }
 
+    // Success message
     return interaction.editReply({
       embeds: [
         makeEmbed(
@@ -315,8 +337,7 @@ async function startVerification(interaction, username) {
           ].join("\n"),
           0x57F287
         )
-      ],
-      components: []
+      ]
     });
 
   } catch (error) {
@@ -328,155 +349,7 @@ async function startVerification(interaction, username) {
   }
 }
 
-
-    const code =
-      "TLRP-" +
-      crypto.randomBytes(4).toString("hex").toUpperCase();
-
-    await pool.query(
-      `INSERT INTO pending_verifications
-      (discord_id, roblox_id, roblox_username, code, expires_at)
-      VALUES ($1, $2, $3, $4, NOW() + INTERVAL '15 minutes')
-      ON CONFLICT (discord_id)
-      DO UPDATE SET
-        roblox_id = EXCLUDED.roblox_id,
-        roblox_username = EXCLUDED.roblox_username,
-        code = EXCLUDED.code,
-        expires_at = EXCLUDED.expires_at`,
-      [interaction.user.id, String(user.id), user.name, code]
-    );
-
-    const embed = makeEmbed(
-      "Roblox verification",
-      [
-        `**Roblox account:** ${user.name}`,
-        "",
-        "**Your unique code:**",
-        `\`${code}\``,
-        "",
-        "1. Open your Roblox profile.",
-        "2. Edit your About description.",
-        "3. Paste your code.",
-        "4. Save your profile.",
-        "5. Return here and press Confirm Verification.",
-        "",
-        "Your code expires in 15 minutes."
-      ].join("\n")
-    );
-
-    const button = new ButtonBuilder()
-      .setCustomId("tlrp_confirm")
-      .setLabel("Confirm Verification")
-      .setEmoji("✅")
-      .setStyle(ButtonStyle.Primary);
-
-    await interaction.editReply({
-      embeds: [embed],
-      components: [
-        new ActionRowBuilder().addComponents(button)
-      ]
-    });
-
-  } catch (error) {
-    console.error(error);
-    await interaction.editReply(
-      "Something went wrong. Please try again later."
-    );
-  }
-}
-
-// CONFIRM OWNERSHIP AND ASSIGN ROLE
-
-async function confirmVerification(interaction) {
-  await interaction.deferReply({ ephemeral: true });
-
-  try {
-    const result = await pool.query(
-      "SELECT * FROM pending_verifications WHERE discord_id = $1",
-      [interaction.user.id]
-    );
-
-    if (!result.rows.length) {
-      return interaction.editReply(
-        "No pending verification. Click Verify Account first."
-      );
-    }
-
-    const pending = result.rows[0];
-
-    if (new Date(pending.expires_at).getTime() < Date.now()) {
-      await pool.query(
-        "DELETE FROM pending_verifications WHERE discord_id = $1",
-        [interaction.user.id]
-      );
-
-      return interaction.editReply(
-        "Your code expired. Please start again."
-      );
-    }
-
-    const profile = await getRobloxProfile(pending.roblox_id);
-
-    if (!profile.description?.includes(pending.code)) {
-      return interaction.editReply(
-        "Code not found in your Roblox About description. Save it and try again."
-      );
-    }
-
-    const saved = await pool.query(
-      `INSERT INTO account_links
-      (discord_id, roblox_id, roblox_username)
-      VALUES ($1, $2, $3)
-      ON CONFLICT DO NOTHING
-      RETURNING discord_id`,
-      [
-        interaction.user.id,
-        String(pending.roblox_id),
-        pending.roblox_username
-      ]
-    );
-
-    if (!saved.rows.length) {
-      return interaction.editReply(
-        "This Roblox account or Discord account is already linked."
-      );
-    }
-
-    const member = await interaction.guild.members.fetch(
-      interaction.user.id
-    );
-
-    await member.roles.add(
-      VERIFIED_ROLE_ID,
-      "TLRP Roblox verification completed"
-    );
-
-    await pool.query(
-      "DELETE FROM pending_verifications WHERE discord_id = $1",
-      [interaction.user.id]
-    );
-
-    return interaction.editReply({
-      embeds: [
-        makeEmbed(
-          "Verification successful!",
-          `Your account **${pending.roblox_username}** is verified. You now have access to TLRP!`,
-          0x57F287
-        )
-      ],
-      components: []
-    });
-
-  } catch (error) {
-    console.error(error);
-    await interaction.editReply(
-      "Verification failed. Please contact an administrator."
-    );
-  }
-}
-
-// PROFILE
-
+// VIEW LINKED PROFILE
 async function showProfile(interaction) {
   await interaction.deferReply({ ephemeral: true });
 
@@ -487,7 +360,7 @@ async function showProfile(interaction) {
 
   if (!result.rows.length) {
     return interaction.editReply(
-      "You are not verified yet. Use the Verify Account button."
+      "You are not verified yet. Click Verify Account to get started."
     );
   }
 
@@ -496,67 +369,69 @@ async function showProfile(interaction) {
   return interaction.editReply({
     embeds: [
       makeEmbed(
-        "Your TLRP profile",
-        `**Roblox:** ${account.roblox_username}\n**Profile:** https://www.roblox.com/users/${account.roblox_id}/profile`
+        "Your TLRP Profile",
+        [
+          `**Roblox:** ${account.roblox_username}`,
+          `**Profile:** https://www.roblox.com/users/${account.roblox_id}/profile`
+        ].join("\n")
       )
     ]
   });
 }
 
-// UNLINK
-
+// UNLINK ACCOUNT
 async function unlinkAccount(interaction) {
   await interaction.deferReply({ ephemeral: true });
 
   const result = await pool.query(
-    "DELETE FROM account_links WHERE discord_id = $1 RETURNING roblox_username",
+    `DELETE FROM account_links
+     WHERE discord_id = $1
+     RETURNING roblox_username`,
     [interaction.user.id]
   );
 
   if (!result.rows.length) {
-    return interaction.editReply("You do not have a linked account.");
+    return interaction.editReply(
+      "You do not have a linked Roblox account."
+    );
   }
-
-  await pool.query(
-    "DELETE FROM pending_verifications WHERE discord_id = $1",
-    [interaction.user.id]
-  );
 
   const member = await interaction.guild.members.fetch(
     interaction.user.id
   );
 
-  await member.roles.remove(VERIFIED_ROLE_ID).catch(console.error);
+  await member.roles.remove(VERIFIED_ROLE_ID);
 
   return interaction.editReply(
-    `Your Roblox account ${result.rows[0].roblox_username} has been unlinked.`
+    `Your Roblox account ${result.rows[0].roblox_username} has been unlinked and your Verified role removed.`
   );
 }
 
-// HANDLE INTERACTIONS
-
+// HANDLE DISCORD INTERACTIONS
 client.on("interactionCreate", async interaction => {
   try {
     if (interaction.guildId !== DISCORD_GUILD_ID) return;
 
+    // BUTTONS
     if (interaction.isButton()) {
       if (interaction.customId === "tlrp_verify") {
         return showModal(interaction);
       }
-
-      if (interaction.customId === "tlrp_confirm") {
-        return confirmVerification(interaction);
-      }
     }
 
-    if (interaction.isModalSubmit() &&
-        interaction.customId === "tlrp_username_modal") {
+    // USERNAME MODAL
+    if (
+      interaction.isModalSubmit() &&
+      interaction.customId === "tlrp_username_modal"
+    ) {
       const username = interaction.fields
-        .getTextInputValue("roblox_username").trim();
+        .getTextInputValue("roblox_username")
+        .trim();
 
       return startVerification(interaction, username);
     }
 
+    // SLASH COMMANDS
     if (!interaction.isChatInputCommand()) return;
 
     if (interaction.commandName === "setupverify") {
@@ -581,7 +456,7 @@ client.on("interactionCreate", async interaction => {
     }
 
   } catch (error) {
-    console.error(error);
+    console.error("INTERACTION ERROR:", error);
 
     const response = {
       content: "An unexpected error occurred. Please try again.",
@@ -600,10 +475,12 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
+// BOT READY
 client.once("ready", () => {
   console.log(`${client.user.tag} is online!`);
 });
 
+// START BOT
 async function start() {
   await initializeDatabase();
   await registerCommands();
@@ -611,10 +488,11 @@ async function start() {
 }
 
 start().catch(error => {
-  console.error("Startup failed:", error);
+  console.error("STARTUP FAILED:", error);
   process.exit(1);
 });
 
+// SHUTDOWN
 process.on("SIGTERM", async () => {
   client.destroy();
   await pool.end();
