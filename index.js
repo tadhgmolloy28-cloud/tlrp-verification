@@ -129,44 +129,56 @@ async function getRobloxProfile(id) {
 
 // CREATE PUBLIC VERIFICATION PANEL
 
+
 async function setupPanel(interaction) {
-  const panel = makeEmbed(
-    "🛡️ Welcome to TLRP!",
-    [
-      "To unlock access to all TLRP channels,",
-      "you must verify your Roblox account.",
-      "",
-      "**How to verify:**",
-      "1. Click Verify Account.",
-      "2. Enter your Roblox username.",
-      "3. Copy your unique verification code.",
-      "4. Put it in your Roblox About description.",
-      "5. Press Confirm Verification.",
-      "",
-      "You will automatically receive the Verified role!",
-      "",
-      "**Click below to get started.**"
-    ].join("\n")
-  );
+  await interaction.deferReply({ ephemeral: true });
 
-  const button = new ButtonBuilder()
-    .setCustomId("tlrp_verify")
-    .setLabel("Verify Account")
-    .setEmoji("🛡️")
-    .setStyle(ButtonStyle.Success);
+  try {
+    const panel = makeEmbed(
+      "🛡️ Welcome to TLRP!",
+      [
+        "To unlock access to all TLRP channels,",
+        "you must verify your Roblox account.",
+        "",
+        "**How to verify:**",
+        "1. Click Verify Account.",
+        "2. Enter your Roblox username.",
+        "3. Copy your unique verification code.",
+        "4. Put it in your Roblox About description.",
+        "5. Press Confirm Verification.",
+        "",
+        "You will automatically receive the Verified role!",
+        "",
+        "**Click below to get started.**"
+      ].join("\n")
+    );
 
-  await interaction.channel.send({
-    embeds: [panel],
-    components: [
-      new ActionRowBuilder().addComponents(button)
-    ]
-  });
+    const button = new ButtonBuilder()
+      .setCustomId("tlrp_verify")
+      .setLabel("Verify Account")
+      .setEmoji("🛡️")
+      .setStyle(ButtonStyle.Success);
 
-  await interaction.reply({
-    content: "Verification panel created!",
-    ephemeral: true
-  });
+    await interaction.channel.send({
+      embeds: [panel],
+      components: [
+        new ActionRowBuilder().addComponents(button)
+      ]
+    });
+
+    await interaction.editReply({
+      content: "✅ TLRP verification panel successfully created!"
+    });
+
+  } catch (error) {
+    console.error("SETUP PANEL ERROR:", error);
+
+    await interaction.editReply({
+      content: "❌ Could not create the panel. Check bot channel permissions."
+    }).catch(console.error);
+  }
 }
+
 
 // SHOW ROBLOX USERNAME POPUP
 
