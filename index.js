@@ -227,6 +227,48 @@ app.post("/verify", async (req, res) => {
     }
 
     
+    // CAPTCHA successfully passed
+    browserVerifications.delete(id);
+
+    await completeVerification(
+      session.interaction,
+      session.username
+    );
+
+    return res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>TLRP Verification</title>
+        <style>
+          body {
+            background: #202225;
+            color: white;
+            font-family: Arial;
+            text-align: center;
+            padding: 60px 15px;
+          }
+          a {
+            display: inline-block;
+            background: #5865f2;
+            color: white;
+            padding: 15px 25px;
+            border-radius: 8px;
+            text-decoration: none;
+          }
+        </style>
+      </head>
+      <body>
+        <h1>✅ CAPTCHA Passed!</h1>
+        <p>Your Roblox verification has been processed.</p>
+        <p>Return to Discord to see your result.</p>
+        <a href="https://discord.com/app">Return to Discord</a>
+      </body>
+      </html>
+    `);
+
+    
 // CAPTCHA passed - continue Roblox verification
 browserVerifications.delete(id);
 
