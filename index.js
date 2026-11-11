@@ -51,6 +51,12 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
+const HCAPTCHA_SITEKEY = process.env.HCAPTCHA_SITEKEY;
+const HCAPTCHA_SECRET = process.env.HCAPTCHA_SECRET;
+const APP_BASE_URL = process.env.APP_BASE_URL;
+
+const browserVerifications = new Map();
+
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
