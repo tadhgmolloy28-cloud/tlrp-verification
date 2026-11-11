@@ -885,6 +885,7 @@ async function showProfile(interaction) {
   });
 }
 
+
 // UNLINK COMMAND
 async function unlinkAccount(interaction) {
   await interaction.deferReply({
@@ -908,10 +909,17 @@ async function unlinkAccount(interaction) {
 
   await member.roles.remove(VERIFIED_ROLE_ID);
 
+  const unverifiedRoleId = process.env.UNVERIFIED_ROLE_ID;
+
+  if (unverifiedRoleId) {
+    await member.roles.add(unverifiedRoleId);
+  }
+
   return interaction.editReply(
-    `Your Roblox account ${result.rows[0].roblox_username} has been unlinked.`
+    `Your Roblox account ${result.rows[0].roblox_username} has been unlinked. Your roles have been updated.`
   );
 }
+
 
 // DISCORD INTERACTIONS
 client.on("interactionCreate", async interaction => {
