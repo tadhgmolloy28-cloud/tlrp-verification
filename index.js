@@ -702,18 +702,38 @@ async function completeVerification(interaction, username) {
       );
     }
 
-    try {
-      await member.roles.add(
-        VERIFIED_ROLE_ID,
-        "TLRP CAPTCHA and Roblox age verification"
-      );
-    } catch (error) {
-      await pool.query(
-        "DELETE FROM account_links WHERE discord_id = $1",
-        [interaction.user.id]
-      );
-      throw error;
-    }
+    
+      try {
+        const unverifiedRoleId = process.env.UNVERIFIED_ROLE_ID;
+
+        if (!unverifiedRoleId) {
+          throw new Error("UNVERIFIED_ROLE_ID is missing from Railway.");
+        }
+
+        // Give Verified role
+        await member.roles.add(
+          VERIFIED_ROLE_ID,
+          "TLRP CAPTCHA and Roblox age verification"
+        );
+
+        // Remove Unverified role
+        await member.roles.remove(
+          unverifiedRoleId,
+          "Member successfully verified"
+        );
+
+      } catch (error) {
+        // Roll back the database link if role assignment fails
+        await member.roles.remove(VERIFIED_ROLE_ID).catch(() => {});
+
+        await pool.query(
+          "DELETE FROM account_links WHERE discord_id = $1",
+          [interaction.user.id]
+        );
+
+        throw error;
+      }
+
 
     return interaction.editReply({
       content: "",
